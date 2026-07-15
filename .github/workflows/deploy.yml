@@ -42,8 +42,11 @@ jobs:
     name: Build & Push Image
     runs-on: ubuntu-latest
     needs: [test]
-    outputs:
-      image_uri: ${{ steps.build-push.outputs.image_uri }}
+    # NOTE: We intentionally do NOT pass image_uri as a job output here.
+    # GitHub Actions masks any output that contains the AWS account ID
+    # (because it's embedded in the ECR registry URL), silently replacing
+    # it with "***" and making the value empty in downstream jobs.
+    # Instead, the provision job reconstructs the URI from its components.
 
     steps:
       - name: Checkout
@@ -104,8 +107,6 @@ jobs:
           echo "Pushing image: ${IMAGE_URI}"
           docker push "${IMAGE_URI}"
 
-          echo "image_uri=${IMAGE_URI}" >> "$GITHUB_OUTPUT"
-
   provision:
     name: Provision Infrastructure
     runs-on: ubuntu-latest
@@ -130,6 +131,19 @@ jobs:
           terraform_version: "1.7.0"
           terraform_wrapper: false
 
+      - name: Reconstruct image URI
+        id: image
+        run: |
+          # Reconstruct the ECR image URI from its individual components.
+          # We cannot rely on the cross-job output from the build job because
+          # GitHub Actions suppresses any job output that contains a masked
+          # secret value (the AWS account ID is part of the ECR hostname and
+          # gets masked, making the output empty in downstream jobs).
+          ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+          IMAGE_URI="${ACCOUNT_ID}.dkr.ecr.${{ secrets.AWS_REGION }}.amazonaws.com/${{ secrets.PROJECT_NAME }}-app:${{ github.sha }}"
+          echo "Resolved image URI: ${IMAGE_URI}"
+          echo "image_uri=${IMAGE_URI}" >> "$GITHUB_OUTPUT"
+
       - name: Terraform Init
         working-directory: terraform
         run: |
@@ -144,7 +158,7 @@ jobs:
           terraform apply -auto-approve \
             -var="project_name=${{ secrets.PROJECT_NAME }}" \
             -var="aws_region=${{ secrets.AWS_REGION }}" \
-            -var="image_uri=${{ needs.build.outputs.image_uri }}"
+            -var="image_uri=${{ steps.image.outputs.image_uri }}"
 
       - name: Capture Terraform outputs
         id: tf-output
